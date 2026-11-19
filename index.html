@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline Tutor - Math & Physics</title>
+<style>
+  :root { --bg:#f7f8fa; --card:#fff; --text:#1c1f26; --muted:#6b7280; --accent:#3b5bdb; --border:#e3e6eb; --user:#e8edff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161a; --card:#1d2026; --text:#e8eaed; --muted:#9aa0aa; --accent:#7c93ff; --border:#2c3038; --user:#252c4a; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:760px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; padding:16px; }
+  h1 { font-size:1.3rem; margin:8px 0 2px; }
+  p.sub { margin:0 0 12px; color:var(--muted); font-size:.9rem; }
+  #loader { border:1px solid var(--border); background:var(--card); border-radius:12px; padding:16px; margin-bottom:12px; }
+  #loader p { margin:0 0 10px; font-size:.9rem; color:var(--muted); }
+  #startBtn, button.send { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:10px 18px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .bar { height:10px; background:var(--border); border-radius:6px; overflow:hidden; margin-top:10px; display:none; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .2s; }
+  #status { font-size:.85rem; color:var(--muted); margin-top:6px; }
+  #chat { flex:1; display:flex; flex-direction:column; gap:10px; overflow-y:auto; padding:4px 0 12px; }
+  .msg { padding:10px 14px; border-radius:12px; border:1px solid var(--border); background:var(--card); white-space:pre-wrap; line-height:1.5; max-width:92%; }
+  .msg.user { align-self:flex-end; background:var(--user); }
+  form { display:flex; gap:8px; position:sticky; bottom:0; padding-top:8px; background:var(--bg); }
+  textarea { flex:1; resize:none; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:var(--card); color:var(--text); font:inherit; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📚 Offline Tutor</h1>
+  <p class="sub">Ask a school Math or Physics question. The AI runs inside your own browser.</p>
+
+  <div id="loader">
+    <p>First time only: the tutor model (about 1 GB) downloads to your device, then it works from the saved copy. Use Wi-Fi.</p>
+    <button id="startBtn" type="button">Start tutor</button>
+    <div class="bar" id="bar"><div id="fill"></div></div>
+    <div id="status"></div>
+  </div>
+
+  <div id="chat"></div>
+
+  <form id="form">
+    <textarea id="q" rows="2" placeholder="Start the tutor first, then type your question..." required disabled></textarea>
+    <button class="send" id="send" type="submit" disabled>Ask</button>
+  </form>
+</div>
+
+<script type="module">
+  import { Wllama } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.0.0/esm/index.js";
+  import WasmFromCDN from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.0.0/esm/wasm-from-cdn.js";
+
+  const MODEL_REPO = "shahab1/qwen-tutor-gguf";
+  const MODEL_FILE = "tutor-q4_k_m.gguf";
+  const SYSTEM_PROMPT = "You are a friendly offline tutor for school students. Explain simply and step by step.";
+
+  const startBtn = document.getElementById("startBtn");
+  const bar = document.getElementById("bar");
+  const fill = document.getElementById("fill");
+  const statusEl = document.getElementById("status");
+  const chat = document.getElementById("chat");
+  const form = document.getElementById("form");
+  const input = document.getElementById("q");
+  const sendBtn = document.getElementById("send");
+
+  let wllama = null;
+  let busy = false;
+
+  function addMsg(text, cls) {
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.textContent = text;
+    chat.appendChild(d);
+    chat.scrollTop = chat.scrollHeight;
+    return d;
+  }
+
+  startBtn.addEventListener("click", async () => {
+    startBtn.disabled = true;
+    bar.style.display = "block";
+    statusEl.textContent = "Downloading model... keep this tab open.";
+    try {
+      wllama = new Wllama(WasmFromCDN);
+      await wllama.loadModelFromHF(
+        { repo: MODEL_REPO, file: MODEL_FILE },
+        {
+          progressCallback: ({ loaded, total }) => {
+            const pct = total ? Math.round((loaded / total) * 100) : 0;
+            fill.style.width = pct + "%";
+            statusEl.textContent = "Downloading model... " + pct + "%";
+          }
+        }
+      );
+      statusEl.textContent = "Tutor is ready!";
+      bar.style.display = "none";
+      input.disabled = false;
+      sendBtn.disabled = false;
+      input.placeholder = "Type your question...";
+      input.focus();
+    } catch (e) {
+      console.error(e);
+      statusEl.textContent = "Could not load the model: " + e.message + " (try again, or use a laptop with more memory)";
+      startBtn.disabled = false;
+    }
+  });
+
+  async function ask(question) {
+    if (busy || !wllama) return;
+    busy = true;
+    sendBtn.disabled = true;
+    addMsg(question, "user");
+    const bot = addMsg("Thinking...", "bot");
+    try {
+      const res = await wllama.createChatCompletion({
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: question.slice(0, 1000) }
+        ],
+        max_tokens: 350,
+        temperature: 0.2,
+        stream: true
+      });
+      let out = "";
+      if (res && typeof res[Symbol.asyncIterator] === "function") {
+        for await (const chunk of res) {
+          const delta = chunk?.choices?.[0]?.delta?.content;
+          if (delta) { out += delta; bot.textContent = out; chat.scrollTop = chat.scrollHeight; }
+        }
+      } else {
+        out = res?.choices?.[0]?.message?.content || "";
+        bot.textContent = out;
+      }
+      if (!out) bot.textContent = "(no answer)";
+    } catch (e) {
+      console.error(e);
+      bot.textContent = "Sorry, something went wrong: " + e.message;
+    } finally {
+      busy = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (!q) return;
+    input.value = "";
+    ask(q);
+  });
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+</script>
+</body>
+</html>
